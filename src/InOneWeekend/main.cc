@@ -19,6 +19,17 @@
 
 #include <iostream>
 
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+
+
+const auto aspect_ratio = 16.0 / 9.0;
+const int image_width = 1200;
+const int image_height = static_cast<int>(image_width / aspect_ratio);
+const int samples_per_pixel = 10;
+const int max_depth = 50;
+
 
 color ray_color(const ray& r, const hittable& world, int depth) {
     hit_record rec;
@@ -88,16 +99,51 @@ hittable_list random_scene() {
 }
 
 
+void render_line(camera cam, const hittable_list world, color *rendered_image, const int line_number) {
+    for (int i = 0; i < image_width; ++i) {
+        color pixel_color(0,0,0);
+        for (int s = 0; s < samples_per_pixel; ++s) {
+            auto u = (i + random_double()) / (image_width-1);
+            auto v = (line_number + random_double()) / (image_height-1);
+            ray r = cam.get_ray(u, v);
+            pixel_color += ray_color(r, world, max_depth);
+        }
+        rendered_image[line_number * image_width + i] = pixel_color;
+    }
+}
+
+
+void render_image(camera cam, const hittable_list world, color *rendered_image, int number_of_threads) {
+    int lines_per_child = image_height / number_of_threads;
+    int rest = image_height % number_of_threads;
+
+    for (int i = 0; i < number_of_threads; ++i) {
+        pid_t pid = fork(); 
+        if (pid == 0) { // child
+            for (int l = 0; l < lines_per_child; ++l) {
+                render_line(cam, world, rendered_image, (i * lines_per_child + l));
+            }
+            exit(0);
+        } else if (rest != 0) { // render rest in parrent
+            for (int l = 0; l < rest; ++l) {
+                render_line(cam, world, rendered_image, ((number_of_threads) * lines_per_child + l));
+            }
+        } else if (pid < 0) {
+            std::cerr << "fork failed";
+            exit(1);
+        }
+    }
+
+    for (int w = 0; w < number_of_threads; w++) {
+        pid_t pid = wait(NULL);
+        if (pid < 0) {
+            std::cerr << "wait failed";
+        }
+    }
+}
+
+
 int main() {
-
-    // Image
-
-    const auto aspect_ratio = 16.0 / 9.0;
-    const int image_width = 1200;
-    const int image_height = static_cast<int>(image_width / aspect_ratio);
-    const int samples_per_pixel = 10;
-    const int max_depth = 50;
-
     // World
 
     auto world = random_scene();
@@ -114,20 +160,21 @@ int main() {
 
     // Render
 
+    int number_of_threads = 4; // configuarable
+
+    int image_size_in_bytes = sizeof(color) * image_width * image_height;
+    color *rendered_image = (color *) mmap(nullptr, image_size_in_bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+
+    std::cerr << "\nStart rendering with " << number_of_threads << " processes.\n";
+
+    render_image(cam, world, rendered_image, number_of_threads);
+
+    // Write to std::cout
+
     std::cout << "P3\n" << image_width << ' ' << image_height << "\n255\n";
 
-    for (int j = image_height-1; j >= 0; --j) {
-        std::cerr << "\rScanlines remaining: " << j << ' ' << std::flush;
-        for (int i = 0; i < image_width; ++i) {
-            color pixel_color(0,0,0);
-            for (int s = 0; s < samples_per_pixel; ++s) {
-                auto u = (i + random_double()) / (image_width-1);
-                auto v = (j + random_double()) / (image_height-1);
-                ray r = cam.get_ray(u, v);
-                pixel_color += ray_color(r, world, max_depth);
-            }
-            write_color(std::cout, pixel_color, samples_per_pixel);
-        }
+    for (int i = (image_width * image_height) - 1; i > -1; i--) {
+        write_color(std::cout, rendered_image[i], samples_per_pixel);
     }
 
     std::cerr << "\nDone.\n";
